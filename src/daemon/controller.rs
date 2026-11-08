@@ -1,4 +1,4 @@
-use crate::fan::{Fan, Fans, Speed};
+use crate::fan::{Fan, Fans};
 use crate::hold::Hold;
 use crate::protocol::Request;
 use crate::smc::{self, Smc};
@@ -19,23 +19,20 @@ impl Controller {
 
     /// Runs every held fan at its held speed.
     pub fn apply(&self) -> smc::Result<()> {
-        self.drive(|held| held)
-    }
-
-    /// Gives every held fan back to the system, keeping the hold for later.
-    pub fn restore(&self) -> smc::Result<()> {
-        self.drive(|_| Speed::Auto)
-    }
-
-    fn drive(&self, speed_for: impl Fn(Speed) -> Speed) -> smc::Result<()> {
         let fans = self.fans();
         for fan in fans.all()? {
-            if let Some(held) = self.hold.get(&fan.name) {
-                let speed = speed_for(held);
+            if let Some(speed) = self.hold.get(&fan.name) {
                 fans.set(&fan, speed)?;
                 eprintln!("vent daemon: {} {speed}", fan.name);
             }
         }
+        Ok(())
+    }
+
+    /// Gives every fan back to the system, keeping the hold for later.
+    pub fn restore(&self) -> smc::Result<()> {
+        self.fans().release_all()?;
+        eprintln!("vent daemon: every fan auto");
         Ok(())
     }
 
@@ -53,16 +50,20 @@ impl Controller {
                 if targets.is_empty() {
                     return Err(format!("no fan named {fan:?}"));
                 }
+                let mut result = Ok(());
                 for target in &targets {
-                    fans.set(target, speed).map_err(|e| e.to_string())?;
-                    self.hold.set(&target.name, speed);
+                    match fans.set(target, speed) {
+                        Ok(()) => self.hold.set(&target.name, speed),
+                        Err(error) => result = result.and(Err(error.to_string())),
+                    }
                 }
                 self.hold.save().map_err(|e| e.to_string())?;
+                result?;
             }
             Request::Release => {
-                self.restore().map_err(|e| e.to_string())?;
                 self.hold = Hold::default();
                 self.hold.save().map_err(|e| e.to_string())?;
+                self.restore().map_err(|e| e.to_string())?;
             }
         }
         Ok(self.hold.to_string())

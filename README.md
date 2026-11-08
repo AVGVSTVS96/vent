@@ -33,3 +33,5 @@ sudo vent uninstall
 A setting holds until you change it, across reboots. The daemon gives every fan back to macOS before the Mac sleeps, when it stops, and if it crashes, and takes them again on wake and start.
 
 Run one fan controller at a time: another app writing fan speeds will undo vent's.
+
+Tested on an M1 Max MacBook Pro.

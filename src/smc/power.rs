@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::ffi::c_void;
 
 use super::ffi;
@@ -38,8 +39,9 @@ extern "C" fn on_message(
     }
 }
 
-/// Runs `handler` before each system sleep and after each wake. Never returns.
-pub fn watch(handler: impl FnMut(Event) + 'static) -> ! {
+/// Runs `handler` before each system sleep and after each wake. Returns only if
+/// the system refuses the registration.
+pub fn watch(handler: impl FnMut(Event) + 'static) -> super::Result<Infallible> {
     let watch = Box::into_raw(Box::new(Watch {
         root: 0,
         handler: Box::new(handler),
@@ -55,6 +57,9 @@ pub fn watch(handler: impl FnMut(Event) + 'static) -> ! {
             on_message,
             &raw mut notifier,
         );
+        if (*watch).root == 0 {
+            return Err(super::Error::Unavailable("power notifications"));
+        }
         let source = ffi::IONotificationPortGetRunLoopSource(port);
         ffi::CFRunLoopAddSource(
             ffi::CFRunLoopGetCurrent(),

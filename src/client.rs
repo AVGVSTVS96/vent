@@ -1,9 +1,12 @@
 use std::io::{ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 use crate::hold::Hold;
 use crate::protocol::{self, Request};
+
+const TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Reply {
     pub version: String,
@@ -18,6 +21,12 @@ pub fn send(request: &Request) -> Result<Reply, String> {
         ErrorKind::PermissionDenied => "only admin accounts can change fan speeds".to_owned(),
         _ => error.to_string(),
     })?;
+    stream
+        .set_read_timeout(Some(TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(TIMEOUT))
+        .map_err(|e| e.to_string())?;
     let mut text = String::new();
     writeln!(stream, "{request}")
         .and_then(|()| stream.shutdown(Shutdown::Write))

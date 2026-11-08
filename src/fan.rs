@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::smc::{self, Key, Smc, Value};
+use crate::smc::{self, Key, Smc};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Speed {
@@ -69,13 +69,14 @@ pub struct Fan {
 
 impl Fan {
     pub fn rpm_for(&self, speed: Speed) -> Option<f64> {
-        match speed {
-            Speed::Auto => None,
-            Speed::Min => Some(self.min),
-            Speed::Max => Some(self.max),
-            Speed::Rpm(rpm) => Some(rpm.clamp(self.min, self.max)),
-            Speed::Percent(percent) => Some(self.min + (self.max - self.min) * percent / 100.0),
-        }
+        let rpm = match speed {
+            Speed::Auto => return None,
+            Speed::Min => self.min,
+            Speed::Max => self.max,
+            Speed::Rpm(rpm) => rpm,
+            Speed::Percent(percent) => self.min + (self.max - self.min) * percent / 100.0,
+        };
+        Some(rpm.max(self.min).min(self.max))
     }
 }
 
@@ -101,44 +102,49 @@ impl<'a> Fans<'a> {
         Key::indexed(b'F', index, suffix)
     }
 
-    fn number(&self, key: Key) -> smc::Result<f64> {
-        Ok(self.smc.read(key)?.number().unwrap_or_default())
-    }
-
-    fn write(&self, key: Key, number: f64) -> smc::Result<()> {
-        let kind = self.smc.info(key)?.kind;
-        self.smc
-            .write(key, &Value::encode(kind, number).unwrap_or_default())
+    pub fn count(&self) -> smc::Result<u8> {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Ok(self.smc.number(Key::new(*b"FNum"))? as u8)
     }
 
     pub fn all(&self) -> smc::Result<Vec<Fan>> {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let count = self.number(Key::new(*b"FNum"))? as u8;
+        let count = self.count()?;
         let laptop = smc::is_laptop();
         (0..count)
             .map(|index| {
                 Ok(Fan {
                     index,
                     name: name(index, count, laptop),
-                    actual: self.number(Self::key(index, *b"Ac"))?,
-                    target: self.number(Self::key(index, *b"Tg"))?,
-                    min: self.number(Self::key(index, *b"Mn"))?,
-                    max: self.number(Self::key(index, *b"Mx"))?,
-                    manual: self.number(Self::key(index, *b"Md"))? >= 1.0,
+                    actual: self.smc.number(Self::key(index, *b"Ac"))?,
+                    target: self.smc.number(Self::key(index, *b"Tg"))?,
+                    min: self.smc.number(Self::key(index, *b"Mn"))?,
+                    max: self.smc.number(Self::key(index, *b"Mx"))?,
+                    manual: self.smc.number(Self::key(index, *b"Md"))? >= 1.0,
                 })
             })
             .collect()
     }
 
     pub fn set(&self, fan: &Fan, speed: Speed) -> smc::Result<()> {
-        let mode = Self::key(fan.index, *b"Md");
         match fan.rpm_for(speed) {
-            None => self.write(mode, 0.0),
+            None => self.release(fan.index),
             Some(rpm) => {
-                self.write(mode, 1.0)?;
-                self.write(Self::key(fan.index, *b"Tg"), rpm)
+                self.smc.write(Self::key(fan.index, *b"Md"), 1.0)?;
+                self.smc.write(Self::key(fan.index, *b"Tg"), rpm)
             }
         }
+    }
+
+    /// Hands one fan back to the system, needing nothing read from it first.
+    pub fn release(&self, index: u8) -> smc::Result<()> {
+        self.smc.write(Self::key(index, *b"Md"), 0.0)
+    }
+
+    /// Hands every fan back, trying each even if one fails.
+    pub fn release_all(&self) -> smc::Result<()> {
+        (0..self.count()?)
+            .map(|index| self.release(index))
+            .fold(Ok(()), Result::and)
     }
 }
 
@@ -177,6 +183,22 @@ mod tests {
         assert_eq!(fan.rpm_for(Speed::Rpm(9000.0)), Some(5800.0));
         assert_eq!(fan.rpm_for(Speed::Rpm(100.0)), Some(1500.0));
         assert_eq!(fan.rpm_for(Speed::Percent(50.0)), Some(3650.0));
+    }
+
+    #[test]
+    fn odd_fan_ranges_never_panic() {
+        let backwards = Fan {
+            min: 5000.0,
+            max: 1000.0,
+            ..fan(false, 0.0)
+        };
+        assert_eq!(backwards.rpm_for(Speed::Rpm(3000.0)), Some(1000.0));
+        let unknown = Fan {
+            min: f64::NAN,
+            max: f64::NAN,
+            ..fan(false, 0.0)
+        };
+        assert!(unknown.rpm_for(Speed::Max).is_some());
     }
 
     #[test]

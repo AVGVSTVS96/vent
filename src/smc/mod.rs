@@ -21,31 +21,27 @@ const NOT_PRIVILEGED: i32 = 0xe000_02c1_u32.cast_signed();
 
 #[derive(Debug)]
 pub enum Error {
-    Unavailable,
+    Unavailable(&'static str),
     Kernel(i32),
-    Smc {
-        key: Key,
-        code: u8,
-    },
+    Smc { key: Key, code: u8 },
     NotFound(Key),
     PermissionDenied,
-    Size {
-        key: Key,
-        expected: usize,
-        got: usize,
-    },
+    Unsupported { key: Key, kind: Key },
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unavailable => write!(f, "AppleSMC service not found"),
+            Self::Unavailable(service) => write!(f, "{service} is unavailable"),
             Self::Kernel(code) => write!(f, "IOKit call failed ({code:#x})"),
             Self::Smc { key, code } => write!(f, "SMC rejected {key} ({code:#x})"),
             Self::NotFound(key) => write!(f, "SMC key {key} does not exist on this Mac"),
             Self::PermissionDenied => write!(f, "writing to the SMC needs root"),
-            Self::Size { key, expected, got } => {
-                write!(f, "{key} takes {expected} bytes, got {got}")
+            Self::Unsupported { key, kind } => {
+                write!(
+                    f,
+                    "{key} holds a {kind:?} value, which vent can't read or write as a number"
+                )
             }
         }
     }
@@ -57,7 +53,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Info {
-    pub size: usize,
+    pub size: u32,
     pub kind: Key,
 }
 
@@ -77,7 +73,7 @@ impl Smc {
             let matching = ffi::IOServiceMatching(c"AppleSMC".as_ptr());
             let service = ffi::IOServiceGetMatchingService(ffi::MAIN_PORT_DEFAULT, matching);
             if service == 0 {
-                return Err(Error::Unavailable);
+                return Err(Error::Unavailable("AppleSMC"));
             }
             let mut connection = 0;
             let status = ffi::IOServiceOpen(service, ffi::task_self(), 0, &raw mut connection);
@@ -128,7 +124,7 @@ impl Smc {
         };
         let output = self.checked(key, &input)?;
         Ok(Info {
-            size: output.info.size as usize,
+            size: output.info.size,
             kind: Key::from(output.info.kind),
         })
     }
@@ -138,35 +134,43 @@ impl Smc {
         let input = KeyData {
             key: key.into(),
             info: KeyInfo {
-                size: u32::try_from(info.size).unwrap_or(32),
+                size: info.size,
                 ..KeyInfo::default()
             },
             command: READ,
             ..KeyData::default()
         };
         let output = self.checked(key, &input)?;
-        Ok(Value::new(info.kind, &output.bytes[..info.size.min(32)]))
+        let size = output.bytes.len().min(info.size as usize);
+        Ok(Value::new(info.kind, &output.bytes[..size]))
     }
 
-    pub fn write(&self, key: Key, bytes: &[u8]) -> Result<()> {
+    pub fn number(&self, key: Key) -> Result<f64> {
+        let value = self.read(key)?;
+        value.number().ok_or(Error::Unsupported {
+            key,
+            kind: value.kind(),
+        })
+    }
+
+    pub fn write(&self, key: Key, number: f64) -> Result<()> {
         let info = self.info(key)?;
-        if bytes.len() != info.size {
-            return Err(Error::Size {
+        let bytes = Value::encode(info.kind, number)
+            .filter(|bytes| bytes.len() == info.size as usize)
+            .ok_or(Error::Unsupported {
                 key,
-                expected: info.size,
-                got: bytes.len(),
-            });
-        }
+                kind: info.kind,
+            })?;
         let mut input = KeyData {
             key: key.into(),
             info: KeyInfo {
-                size: u32::try_from(info.size).unwrap_or(32),
+                size: info.size,
                 ..KeyInfo::default()
             },
             command: WRITE,
             ..KeyData::default()
         };
-        input.bytes[..bytes.len()].copy_from_slice(bytes);
+        input.bytes[..bytes.len()].copy_from_slice(&bytes);
         self.checked(key, &input).map(|_| ())
     }
 

@@ -1,12 +1,13 @@
 mod controller;
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 use std::{fs, thread};
 
-use crate::fan::{Fans, Speed};
+use crate::fan::Fans;
 use crate::hold::Hold;
 use crate::protocol::{self, Request};
 use crate::smc::{Smc, power};
@@ -15,6 +16,8 @@ use controller::Controller;
 
 const ADMIN_GROUP: u32 = 80;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const LONGEST_REQUEST: u64 = 256;
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
 
 type Shared = Arc<Mutex<Controller>>;
 
@@ -25,7 +28,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         give_every_fan_back();
     }));
 
-    let controller = Controller::new(Smc::open()?, Hold::load()?);
+    let hold = Hold::load().unwrap_or_else(|error| {
+        eprintln!("vent daemon: ignoring the saved hold: {error}");
+        Hold::default()
+    });
+    let controller = Controller::new(Smc::open()?, hold);
     if let Err(error) = controller.apply() {
         eprintln!("vent daemon: could not apply the saved hold: {error}");
     }
@@ -40,7 +47,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let controller = controller.clone();
         move || stop_on_signal(signals, &controller)
     });
-    power::watch(move |event| {
+    match power::watch(move |event| {
         let controller = controller.lock().unwrap_or_else(PoisonError::into_inner);
         let result = match event {
             power::Event::Sleep => controller.restore(),
@@ -49,7 +56,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(error) = result {
             eprintln!("vent daemon: {event:?}: {error}");
         }
-    })
+    })? {}
 }
 
 fn listen() -> std::io::Result<UnixListener> {
@@ -69,8 +76,12 @@ fn serve(listener: &UnixListener, controller: &Shared) {
 }
 
 fn answer(stream: &UnixStream, controller: &Shared) -> std::io::Result<()> {
+    if stream.set_read_timeout(Some(CLIENT_TIMEOUT)).is_err() {
+        return Ok(());
+    }
+    stream.set_write_timeout(Some(CLIENT_TIMEOUT))?;
     let mut line = String::new();
-    if BufReader::new(stream).read_line(&mut line)? == 0 {
+    if BufReader::new(stream.take(LONGEST_REQUEST)).read_line(&mut line)? == 0 {
         return Ok(());
     }
     let result = line.parse::<Request>().and_then(|request| {
@@ -116,9 +127,7 @@ fn stop_on_signal(signals: libc::sigset_t, controller: &Shared) {
 
 /// Last resort after a panic: a fresh SMC connection, since the shared one may be locked.
 fn give_every_fan_back() {
-    let Ok(smc) = Smc::open() else { return };
-    let fans = Fans::new(&smc);
-    for fan in fans.all().unwrap_or_default() {
-        let _ = fans.set(&fan, Speed::Auto);
+    if let Ok(smc) = Smc::open() {
+        let _ = Fans::new(&smc).release_all();
     }
 }

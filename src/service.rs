@@ -1,5 +1,4 @@
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 use std::{fs, io, thread};
@@ -20,6 +19,7 @@ pub fn install() -> io::Result<()> {
     fs::set_permissions(&draft, fs::Permissions::from_mode(0o755))?;
     fs::rename(&draft, HELPER)?;
     fs::write(PLIST, plist())?;
+    fs::set_permissions(PLIST, fs::Permissions::from_mode(0o644))?;
     launchctl(&["bootstrap", "system", PLIST])?;
     if wait_until(client::is_running) {
         Ok(())
@@ -42,11 +42,11 @@ pub fn uninstall() -> io::Result<()> {
     Ok(())
 }
 
-/// The daemon gives the fans back, then removes its socket and exits.
-/// `launchctl bootout` can return before that, so wait for the socket to go.
+/// The daemon gives the fans back, then exits. `launchctl bootout` can return
+/// before that, so wait until it stops answering.
 fn stop() {
     let _ = launchctl(&["bootout", &format!("system/{LABEL}")]);
-    wait_until(|| !Path::new(protocol::SOCKET).exists());
+    wait_until(|| !client::is_running());
 }
 
 fn wait_until(done: impl Fn() -> bool) -> bool {
