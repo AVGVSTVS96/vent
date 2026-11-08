@@ -104,15 +104,7 @@ fn smc_command(command: SmcCommand) -> Result<(), Box<dyn Error>> {
     let mut out = io::stdout().lock();
     let keys = match command {
         SmcCommand::Read { key } => vec![key],
-        SmcCommand::List { prefix } => smc
-            .keys()?
-            .into_iter()
-            .filter(|key| {
-                prefix
-                    .as_deref()
-                    .is_none_or(|prefix| key.as_str().starts_with(prefix))
-            })
-            .collect(),
+        SmcCommand::List { prefix } => smc.keys(prefix.as_deref().unwrap_or_default())?,
     };
     for key in keys {
         match smc.read(key) {

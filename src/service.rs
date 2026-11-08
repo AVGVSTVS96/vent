@@ -1,4 +1,5 @@
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 use std::{fs, io, thread};
@@ -20,15 +21,13 @@ pub fn install() -> io::Result<()> {
     fs::rename(&draft, HELPER)?;
     fs::write(PLIST, plist())?;
     launchctl(&["bootstrap", "system", PLIST])?;
-    for _ in 0..50 {
-        if client::is_running() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(100));
+    if wait_until(client::is_running) {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "the daemon didn't start; see {LOG}"
+        )))
     }
-    Err(io::Error::other(format!(
-        "the daemon didn't start; see {LOG}"
-    )))
 }
 
 pub fn uninstall() -> io::Result<()> {
@@ -43,9 +42,20 @@ pub fn uninstall() -> io::Result<()> {
     Ok(())
 }
 
-/// Stopping the daemon makes it give the fans back before it exits.
+/// The daemon gives the fans back, then removes its socket and exits.
+/// `launchctl bootout` can return before that, so wait for the socket to go.
 fn stop() {
     let _ = launchctl(&["bootout", &format!("system/{LABEL}")]);
+    wait_until(|| !Path::new(protocol::SOCKET).exists());
+}
+
+fn wait_until(done: impl Fn() -> bool) -> bool {
+    (0..50).any(|_| {
+        done() || {
+            thread::sleep(Duration::from_millis(100));
+            false
+        }
+    })
 }
 
 fn require_root() -> io::Result<()> {

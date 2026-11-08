@@ -19,21 +19,21 @@ impl Controller {
 
     /// Runs every held fan at its held speed.
     pub fn apply(&self) -> smc::Result<()> {
-        let fans = self.fans();
-        for fan in fans.all()? {
-            if let Some(speed) = self.hold.get(&fan.name) {
-                fans.set(&fan, speed)?;
-            }
-        }
-        Ok(())
+        self.drive(|held| held)
     }
 
     /// Gives every held fan back to the system, keeping the hold for later.
     pub fn restore(&self) -> smc::Result<()> {
+        self.drive(|_| Speed::Auto)
+    }
+
+    fn drive(&self, speed_for: impl Fn(Speed) -> Speed) -> smc::Result<()> {
         let fans = self.fans();
         for fan in fans.all()? {
-            if self.hold.get(&fan.name).is_some() {
-                fans.set(&fan, Speed::Auto)?;
+            if let Some(held) = self.hold.get(&fan.name) {
+                let speed = speed_for(held);
+                fans.set(&fan, speed)?;
+                eprintln!("vent daemon: {} {speed}", fan.name);
             }
         }
         Ok(())

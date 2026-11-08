@@ -17,6 +17,7 @@ const WRITE: u8 = 6;
 const KEY_AT_INDEX: u8 = 8;
 const KEY_INFO: u8 = 9;
 const KEY_NOT_FOUND: u8 = 0x84;
+const NOT_PRIVILEGED: i32 = 0xe000_02c1_u32.cast_signed();
 
 #[derive(Debug)]
 pub enum Error {
@@ -105,8 +106,7 @@ impl Smc {
         };
         match status {
             ffi::KERN_SUCCESS => Ok(output),
-            // kIOReturnNotPrivileged
-            -536_870_207 => Err(Error::PermissionDenied),
+            NOT_PRIVILEGED => Err(Error::PermissionDenied),
             code => Err(Error::Kernel(code)),
         }
     }
@@ -187,10 +187,27 @@ impl Smc {
         Ok(Key::from(output.key))
     }
 
-    pub fn keys(&self) -> Result<Vec<Key>> {
-        (0..self.key_count()?)
-            .map(|index| self.key_at(index))
-            .collect()
+    /// The SMC indexes its keys in sorted order, so a prefix is one run found by binary search.
+    pub fn keys(&self, prefix: &str) -> Result<Vec<Key>> {
+        let count = self.key_count()?;
+        let (mut low, mut high) = (0, count);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.key_at(middle)?.as_str() < prefix {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let mut keys = Vec::new();
+        for index in low..count {
+            let key = self.key_at(index)?;
+            if !key.as_str().starts_with(prefix) {
+                break;
+            }
+            keys.push(key);
+        }
+        Ok(keys)
     }
 }
 

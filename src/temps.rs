@@ -38,9 +38,8 @@ pub fn summarize(readings: &[(Key, f64)]) -> Vec<Temp> {
 
 pub fn read(smc: &Smc) -> smc::Result<Vec<Temp>> {
     let readings: Vec<(Key, f64)> = smc
-        .keys()?
+        .keys("T")?
         .into_iter()
-        .filter(|key| key.as_str().starts_with('T'))
         .filter_map(|key| Some((key, smc.read(key).ok()?.number()?)))
         .collect();
     Ok(summarize(&readings))
