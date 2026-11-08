@@ -3,9 +3,6 @@ use std::str::FromStr;
 
 use crate::smc::{self, Key, Smc, Value};
 
-const MANUAL: f64 = 1.0;
-const AUTO: f64 = 0.0;
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Speed {
     Auto,
@@ -22,28 +19,27 @@ impl FromStr for Speed {
         let text = text.trim().to_ascii_lowercase();
         let invalid = || {
             format!(
-                "{text:?} is not a speed: use auto, min, max, an RPM like 3000, or a percent like 80%"
+                "{text:?} is not a speed: use auto, min, max, an rpm like 3000, or a percent like 80%"
             )
         };
-        match text.as_str() {
-            "auto" => Ok(Self::Auto),
-            "min" => Ok(Self::Min),
-            "max" => Ok(Self::Max),
+        let speed = match text.as_str() {
+            "auto" => Self::Auto,
+            "min" => Self::Min,
+            "max" => Self::Max,
             _ => match text.strip_suffix('%') {
-                Some(percent) => {
-                    let percent: f64 = percent.parse().map_err(|_| invalid())?;
-                    if (0.0..=100.0).contains(&percent) {
-                        Ok(Self::Percent(percent))
-                    } else {
-                        Err(invalid())
-                    }
-                }
-                None => text
-                    .trim_end_matches("rpm")
-                    .parse()
-                    .map(Self::Rpm)
-                    .map_err(|_| invalid()),
+                Some(percent) => Self::Percent(percent.parse().map_err(|_| invalid())?),
+                None => Self::Rpm(
+                    text.trim_end_matches("rpm")
+                        .trim()
+                        .parse()
+                        .map_err(|_| invalid())?,
+                ),
             },
+        };
+        match speed {
+            Self::Percent(p) if !(0.0..=100.0).contains(&p) => Err(invalid()),
+            Self::Rpm(r) if !r.is_finite() || r < 0.0 => Err(invalid()),
+            _ => Ok(speed),
         }
     }
 }
@@ -54,16 +50,16 @@ impl fmt::Display for Speed {
             Self::Auto => f.write_str("auto"),
             Self::Min => f.write_str("min"),
             Self::Max => f.write_str("max"),
-            Self::Rpm(rpm) => write!(f, "{rpm:.0} rpm"),
+            Self::Rpm(rpm) => write!(f, "{rpm:.0}"),
             Self::Percent(percent) => write!(f, "{percent}%"),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Fan {
     pub index: u8,
-    pub name: &'static str,
+    pub name: String,
     pub actual: f64,
     pub target: f64,
     pub min: f64,
@@ -72,10 +68,6 @@ pub struct Fan {
 }
 
 impl Fan {
-    fn key(index: u8, suffix: &[u8; 2]) -> Key {
-        Key::indexed(b'F', index, *suffix)
-    }
-
     pub fn rpm_for(&self, speed: Speed) -> Option<f64> {
         match speed {
             Speed::Auto => None,
@@ -84,6 +76,15 @@ impl Fan {
             Speed::Rpm(rpm) => Some(rpm.clamp(self.min, self.max)),
             Speed::Percent(percent) => Some(self.min + (self.max - self.min) * percent / 100.0),
         }
+    }
+}
+
+/// Fans on a two-fan laptop are named for the side they sit on, as seen from the keyboard.
+pub fn name(index: u8, count: u8, laptop: bool) -> String {
+    match (laptop, count, index) {
+        (true, 2, 0) => "left".into(),
+        (true, 2, 1) => "right".into(),
+        _ => format!("fan{index}"),
     }
 }
 
@@ -96,65 +97,92 @@ impl<'a> Fans<'a> {
         Self { smc }
     }
 
+    fn key(index: u8, suffix: [u8; 2]) -> Key {
+        Key::indexed(b'F', index, suffix)
+    }
+
     fn number(&self, key: Key) -> smc::Result<f64> {
-        let value = self.smc.read(key)?;
-        Ok(value.number().unwrap_or_default())
+        Ok(self.smc.read(key)?.number().unwrap_or_default())
     }
 
     fn write(&self, key: Key, number: f64) -> smc::Result<()> {
         let kind = self.smc.info(key)?.kind;
-        let bytes = Value::encode(kind, number).unwrap_or_default();
-        self.smc.write(key, &bytes)
-    }
-
-    pub fn count(&self) -> smc::Result<u8> {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Ok(self.number(Key::new(*b"FNum"))? as u8)
-    }
-
-    pub fn get(&self, index: u8) -> smc::Result<Fan> {
-        let count = self.count()?;
-        Ok(Fan {
-            index,
-            name: name(index, count),
-            actual: self.number(Fan::key(index, b"Ac"))?,
-            target: self.number(Fan::key(index, b"Tg"))?,
-            min: self.number(Fan::key(index, b"Mn"))?,
-            max: self.number(Fan::key(index, b"Mx"))?,
-            manual: self.number(Fan::key(index, b"Md"))? >= MANUAL,
-        })
+        self.smc
+            .write(key, &Value::encode(kind, number).unwrap_or_default())
     }
 
     pub fn all(&self) -> smc::Result<Vec<Fan>> {
-        (0..self.count()?).map(|index| self.get(index)).collect()
-    }
-
-    pub fn find(&self, name_or_index: &str) -> smc::Result<Option<Fan>> {
-        let wanted = name_or_index.to_ascii_lowercase();
-        Ok(self
-            .all()?
-            .into_iter()
-            .find(|fan| fan.name == wanted || fan.index.to_string() == wanted))
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let count = self.number(Key::new(*b"FNum"))? as u8;
+        let laptop = smc::is_laptop();
+        (0..count)
+            .map(|index| {
+                Ok(Fan {
+                    index,
+                    name: name(index, count, laptop),
+                    actual: self.number(Self::key(index, *b"Ac"))?,
+                    target: self.number(Self::key(index, *b"Tg"))?,
+                    min: self.number(Self::key(index, *b"Mn"))?,
+                    max: self.number(Self::key(index, *b"Mx"))?,
+                    manual: self.number(Self::key(index, *b"Md"))? >= 1.0,
+                })
+            })
+            .collect()
     }
 
     pub fn set(&self, fan: &Fan, speed: Speed) -> smc::Result<()> {
+        let mode = Self::key(fan.index, *b"Md");
         match fan.rpm_for(speed) {
-            None => self.write(Fan::key(fan.index, b"Md"), AUTO),
+            None => self.write(mode, 0.0),
             Some(rpm) => {
-                self.write(Fan::key(fan.index, b"Md"), MANUAL)?;
-                self.write(Fan::key(fan.index, b"Tg"), rpm)
+                self.write(mode, 1.0)?;
+                self.write(Self::key(fan.index, *b"Tg"), rpm)
             }
         }
     }
 }
 
-fn name(index: u8, count: u8) -> &'static str {
-    match (count, index) {
-        (2, 0) => "left",
-        (2, 1) => "right",
-        (_, 0) => "0",
-        (_, 1) => "1",
-        (_, 2) => "2",
-        _ => "3",
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fan(manual: bool, target: f64) -> Fan {
+        Fan {
+            index: 1,
+            name: "right".into(),
+            actual: target,
+            target,
+            min: 1500.0,
+            max: 5800.0,
+            manual,
+        }
+    }
+
+    #[test]
+    fn speeds_parse_and_print_back() {
+        for text in ["auto", "min", "max", "3000", "80%", "12.5%"] {
+            assert_eq!(text.parse::<Speed>().unwrap().to_string(), text);
+        }
+        assert_eq!("3000 RPM".parse::<Speed>(), Ok(Speed::Rpm(3000.0)));
+        for bad in ["", "fast", "101%", "-5", "nan"] {
+            assert!(bad.parse::<Speed>().is_err(), "{bad} parsed");
+        }
+    }
+
+    #[test]
+    fn speeds_resolve_within_the_fan_range() {
+        let fan = fan(false, 0.0);
+        assert_eq!(fan.rpm_for(Speed::Auto), None);
+        assert_eq!(fan.rpm_for(Speed::Max), Some(5800.0));
+        assert_eq!(fan.rpm_for(Speed::Rpm(9000.0)), Some(5800.0));
+        assert_eq!(fan.rpm_for(Speed::Rpm(100.0)), Some(1500.0));
+        assert_eq!(fan.rpm_for(Speed::Percent(50.0)), Some(3650.0));
+    }
+
+    #[test]
+    fn only_two_fan_laptops_get_sides() {
+        assert_eq!(name(1, 2, true), "right");
+        assert_eq!(name(1, 2, false), "fan1");
+        assert_eq!(name(0, 1, true), "fan0");
     }
 }

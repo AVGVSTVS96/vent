@@ -35,6 +35,7 @@ impl Value {
             ("ui32", 4) => f64::from(u32::from_be_bytes(b.try_into().ok()?)),
             ("sp78", 2) => f64::from(i16::from_be_bytes(b.try_into().ok()?)) / 256.0,
             ("fpe2", 2) => f64::from(u16::from_be_bytes(b.try_into().ok()?)) / 4.0,
+            #[allow(clippy::cast_precision_loss)]
             ("ioft", 8) => u64::from_le_bytes(b.try_into().ok()?) as f64 / 65536.0,
             _ => return None,
         })

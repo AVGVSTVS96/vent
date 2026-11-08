@@ -1,5 +1,6 @@
 mod ffi;
 mod key;
+pub mod power;
 mod value;
 
 use std::ffi::c_void;
@@ -57,6 +58,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Info {
     pub size: usize,
     pub kind: Key,
+}
+
+pub fn is_laptop() -> bool {
+    ffi::has_service(c"AppleSmartBattery")
 }
 
 pub struct Smc {
