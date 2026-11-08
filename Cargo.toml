@@ -1,0 +1,17 @@
+[package]
+name = "vent"
+version = "0.1.0"
+edition = "2024"
+description = "Fan control and temperatures for Apple Silicon Macs, from the command line"
+license = "MIT"
+repository = "https://github.com/AVGVSTVS96/vent"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
