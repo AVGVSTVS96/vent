@@ -70,7 +70,9 @@ impl FromStr for Settings {
 
 impl fmt::Display for Settings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "curve {}", self.curve)?;
+        if self.curve != Curve::default() {
+            writeln!(f, "curve {}", self.curve)?;
+        }
         self.fans
             .iter()
             .try_for_each(|(fan, speed)| writeln!(f, "{fan} {speed}"))
@@ -94,6 +96,13 @@ mod tests {
             "curve 55 90\nleft system\nright max\n"
         );
         assert_eq!(settings.to_string().parse::<Settings>(), Ok(settings));
+    }
+
+    #[test]
+    fn a_default_curve_is_left_out_so_new_defaults_reach_it() {
+        let mut settings = Settings::default();
+        settings.set("right", Speed::Max);
+        assert_eq!(settings.to_string(), "right max\n");
     }
 
     #[test]
