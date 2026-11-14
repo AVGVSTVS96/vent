@@ -4,10 +4,10 @@ Fan control and temperatures for Apple Silicon Macs, from the command line.
 
 ```console
 $ vent
-left    3038 rpm  auto
-right   3206 rpm  auto
+left    1781 rpm  auto
+right   1870 rpm  auto
 cpu 87°  gpu 65°  memory 59°  ssd 40°  battery 32°
-heat 75°, auto curve 65° to 90°
+heat 75°, auto curve 70° to 95°
 ```
 
 ## Install

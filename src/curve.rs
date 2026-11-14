@@ -9,13 +9,13 @@ pub struct Curve {
     pub full: f64,
 }
 
-/// Read off an M1 Max: light work averages under 65°, while a heavy load holds
-/// 75° to 85° with macOS keeping the fans near their minimum.
+/// Read off an M1 Max under a heavy load of builds and simulators: the chip
+/// averaged 70° to 85° while macOS kept both fans near their minimum.
 impl Default for Curve {
     fn default() -> Self {
         Self {
-            start: 65.0,
-            full: 90.0,
+            start: 70.0,
+            full: 95.0,
         }
     }
 }
@@ -80,8 +80,8 @@ mod tests {
 
     #[test]
     fn curves_parse_and_print_back() {
-        assert_eq!("65 90".parse::<Curve>(), Ok(Curve::default()));
-        assert_eq!("65° 90°".parse::<Curve>(), Ok(Curve::default()));
+        assert_eq!("70 95".parse::<Curve>(), Ok(Curve::default()));
+        assert_eq!("70° 95°".parse::<Curve>(), Ok(Curve::default()));
         assert_eq!(Curve::default().to_string().parse(), Ok(Curve::default()));
         for bad in ["", "60", "85 60", "60 200", "hot cold", "60 nan"] {
             assert!(bad.parse::<Curve>().is_err(), "{bad} parsed");
