@@ -3,7 +3,7 @@ use std::process::Command;
 use std::time::Duration;
 use std::{fs, io, thread};
 
-use crate::{client, hold, protocol};
+use crate::{client, protocol, settings};
 
 const LABEL: &str = "io.github.avgvstvs96.vent";
 const HELPER: &str = "/Library/PrivilegedHelperTools/io.github.avgvstvs96.vent";
@@ -33,7 +33,7 @@ pub fn install() -> io::Result<()> {
 pub fn uninstall() -> io::Result<()> {
     require_root()?;
     stop();
-    for path in [PLIST, HELPER, LOG, protocol::SOCKET, hold::PATH] {
+    for path in [PLIST, HELPER, LOG, protocol::SOCKET, settings::PATH] {
         match fs::remove_file(path) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}

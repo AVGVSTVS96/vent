@@ -8,16 +8,18 @@ use std::time::Duration;
 use std::{fs, thread};
 
 use crate::fan::Fans;
-use crate::hold::Hold;
 use crate::protocol::{self, Request};
+use crate::settings::Settings;
 use crate::smc::{Smc, power};
+use crate::temps::Sensors;
 
 use controller::Controller;
 
 const ADMIN_GROUP: u32 = 80;
-const VERSION: &str = env!("CARGO_PKG_VERSION");
 const LONGEST_REQUEST: u64 = 256;
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
+/// Temperatures can only be read, not watched, so vent reads them once a second.
+const TICK: Duration = Duration::from_secs(1);
 
 type Shared = Arc<Mutex<Controller>>;
 
@@ -28,15 +30,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         give_every_fan_back();
     }));
 
-    let hold = Hold::load().unwrap_or_else(|error| {
-        eprintln!("vent daemon: ignoring the saved hold: {error}");
-        Hold::default()
+    let settings = Settings::load().unwrap_or_else(|error| {
+        eprintln!("vent daemon: ignoring the saved settings: {error}");
+        Settings::default()
     });
-    let controller = Controller::new(Smc::open()?, hold);
-    if let Err(error) = controller.apply() {
-        eprintln!("vent daemon: could not apply the saved hold: {error}");
-    }
-    let controller: Shared = Arc::new(Mutex::new(controller));
+    let smc = Smc::open()?;
+    let sensors = Sensors::find(&smc)?;
+    let controller: Shared = Arc::new(Mutex::new(Controller::new(smc, sensors, settings)));
 
     let listener = listen()?;
     thread::spawn({
@@ -47,16 +47,39 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let controller = controller.clone();
         move || stop_on_signal(signals, &controller)
     });
+    thread::spawn({
+        let controller = controller.clone();
+        move || follow_heat(&controller)
+    });
     match power::watch(move |event| {
-        let controller = controller.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut controller = lock(&controller);
         let result = match event {
-            power::Event::Sleep => controller.restore(),
-            power::Event::Wake => controller.apply(),
+            power::Event::Sleep => controller.sleep(),
+            power::Event::Wake => controller.wake(),
         };
         if let Err(error) = result {
             eprintln!("vent daemon: {event:?}: {error}");
         }
     })? {}
+}
+
+fn lock(controller: &Shared) -> std::sync::MutexGuard<'_, Controller> {
+    controller.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn follow_heat(controller: &Shared) {
+    let mut failing = false;
+    loop {
+        match lock(controller).tick() {
+            Ok(()) => failing = false,
+            Err(error) if !failing => {
+                eprintln!("vent daemon: {error}");
+                failing = true;
+            }
+            Err(_) => {}
+        }
+        thread::sleep(TICK);
+    }
 }
 
 fn listen() -> std::io::Result<UnixListener> {
@@ -84,14 +107,11 @@ fn answer(stream: &UnixStream, controller: &Shared) -> std::io::Result<()> {
     if BufReader::new(stream.take(LONGEST_REQUEST)).read_line(&mut line)? == 0 {
         return Ok(());
     }
-    let result = line.parse::<Request>().and_then(|request| {
-        controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .handle(request)
-    });
+    let result = line
+        .parse::<Request>()
+        .and_then(|request| lock(controller).handle(request));
     let mut stream = stream;
-    stream.write_all(protocol::reply(VERSION, &result).as_bytes())
+    stream.write_all(protocol::reply(&result).as_bytes())
 }
 
 fn block_signals() -> libc::sigset_t {
@@ -114,11 +134,7 @@ fn stop_on_signal(signals: libc::sigset_t, controller: &Shared) {
     unsafe {
         libc::sigwait(&raw const signals, &raw mut signal);
     }
-    if let Err(error) = controller
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .restore()
-    {
+    if let Err(error) = lock(controller).sleep() {
         eprintln!("vent daemon: could not give the fans back: {error}");
     }
     let _ = fs::remove_file(protocol::SOCKET);

@@ -5,7 +5,10 @@ use crate::smc::{self, Key, Smc};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Speed {
+    /// Follows the curve: macOS while cool, vent as heat builds.
     Auto,
+    /// Always macOS.
+    System,
     Min,
     Max,
     Rpm(f64),
@@ -19,11 +22,12 @@ impl FromStr for Speed {
         let text = text.trim().to_ascii_lowercase();
         let invalid = || {
             format!(
-                "{text:?} is not a speed: use auto, min, max, an rpm like 3000, or a percent like 80%"
+                "{text:?} is not a speed: use auto, system, min, max, an rpm like 3000, or a percent like 80%"
             )
         };
         let speed = match text.as_str() {
             "auto" => Self::Auto,
+            "system" => Self::System,
             "min" => Self::Min,
             "max" => Self::Max,
             _ => match text.strip_suffix('%') {
@@ -48,6 +52,7 @@ impl fmt::Display for Speed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Auto => f.write_str("auto"),
+            Self::System => f.write_str("system"),
             Self::Min => f.write_str("min"),
             Self::Max => f.write_str("max"),
             Self::Rpm(rpm) => write!(f, "{rpm:.0}"),
@@ -68,9 +73,10 @@ pub struct Fan {
 }
 
 impl Fan {
+    /// The rpm a fixed speed means for this fan; auto and system have none.
     pub fn rpm_for(&self, speed: Speed) -> Option<f64> {
         let rpm = match speed {
-            Speed::Auto => return None,
+            Speed::Auto | Speed::System => return None,
             Speed::Min => self.min,
             Speed::Max => self.max,
             Speed::Rpm(rpm) => rpm,
@@ -88,6 +94,9 @@ pub fn name(index: u8, count: u8, laptop: bool) -> String {
         _ => format!("fan{index}"),
     }
 }
+
+/// Fan mode 1 is manual. macOS uses 0, and 3 on Apple Silicon at boot, for its own control.
+const MANUAL: f64 = 1.0;
 
 pub struct Fans<'a> {
     smc: &'a Smc,
@@ -119,20 +128,15 @@ impl<'a> Fans<'a> {
                     target: self.smc.number(Self::key(index, *b"Tg"))?,
                     min: self.smc.number(Self::key(index, *b"Mn"))?,
                     max: self.smc.number(Self::key(index, *b"Mx"))?,
-                    manual: self.smc.number(Self::key(index, *b"Md"))? >= 1.0,
+                    manual: self.smc.number(Self::key(index, *b"Md"))? == MANUAL,
                 })
             })
             .collect()
     }
 
-    pub fn set(&self, fan: &Fan, speed: Speed) -> smc::Result<()> {
-        match fan.rpm_for(speed) {
-            None => self.release(fan.index),
-            Some(rpm) => {
-                self.smc.write(Self::key(fan.index, *b"Md"), 1.0)?;
-                self.smc.write(Self::key(fan.index, *b"Tg"), rpm)
-            }
-        }
+    pub fn run_at(&self, index: u8, rpm: f64) -> smc::Result<()> {
+        self.smc.write(Self::key(index, *b"Md"), MANUAL)?;
+        self.smc.write(Self::key(index, *b"Tg"), rpm)
     }
 
     /// Hands one fan back to the system, needing nothing read from it first.
@@ -166,7 +170,7 @@ mod tests {
 
     #[test]
     fn speeds_parse_and_print_back() {
-        for text in ["auto", "min", "max", "3000", "80%", "12.5%"] {
+        for text in ["auto", "system", "min", "max", "3000", "80%", "12.5%"] {
             assert_eq!(text.parse::<Speed>().unwrap().to_string(), text);
         }
         assert_eq!("3000 RPM".parse::<Speed>(), Ok(Speed::Rpm(3000.0)));
@@ -179,6 +183,7 @@ mod tests {
     fn speeds_resolve_within_the_fan_range() {
         let fan = fan(false, 0.0);
         assert_eq!(fan.rpm_for(Speed::Auto), None);
+        assert_eq!(fan.rpm_for(Speed::System), None);
         assert_eq!(fan.rpm_for(Speed::Max), Some(5800.0));
         assert_eq!(fan.rpm_for(Speed::Rpm(9000.0)), Some(5800.0));
         assert_eq!(fan.rpm_for(Speed::Rpm(100.0)), Some(1500.0));

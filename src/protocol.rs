@@ -1,7 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::curve::Curve;
 use crate::fan::Speed;
+use crate::settings::Settings;
 
 pub const SOCKET: &str = "/var/run/vent.sock";
 
@@ -9,7 +11,8 @@ pub const SOCKET: &str = "/var/run/vent.sock";
 pub enum Request {
     Get,
     Set { fan: String, speed: Speed },
-    Release,
+    Auto,
+    Curve(Curve),
 }
 
 impl FromStr for Request {
@@ -19,7 +22,8 @@ impl FromStr for Request {
         let words: Vec<&str> = text.split_whitespace().collect();
         match words.as_slice() {
             ["get"] => Ok(Self::Get),
-            ["release"] => Ok(Self::Release),
+            ["auto"] => Ok(Self::Auto),
+            ["curve", start, full] => Ok(Self::Curve(format!("{start} {full}").parse()?)),
             ["set", fan, speed] => Ok(Self::Set {
                 fan: (*fan).to_owned(),
                 speed: speed.parse()?,
@@ -33,26 +37,48 @@ impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Get => f.write_str("get"),
-            Self::Release => f.write_str("release"),
+            Self::Auto => f.write_str("auto"),
+            Self::Curve(curve) => write!(f, "curve {curve}"),
             Self::Set { fan, speed } => write!(f, "set {fan} {speed}"),
         }
     }
 }
 
-/// The daemon answers `ok <version>` and its hold, one fan per line, or `error <reason>`.
-pub fn reply(version: &str, result: &Result<String, String>) -> String {
+/// What the daemon is doing: its version, the heat its curve sees, and its settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Status {
+    pub version: String,
+    pub heat: Option<f64>,
+    pub settings: Settings,
+}
+
+/// The daemon answers `ok <version> <heat or ->` and its settings, or `error <reason>`.
+pub fn reply(result: &Result<Status, String>) -> String {
     match result {
-        Ok(hold) => format!("ok {version}\n{hold}"),
+        Ok(status) => {
+            let heat = status
+                .heat
+                .map_or_else(|| "-".to_owned(), |heat| format!("{heat:.1}"));
+            format!("ok {} {heat}\n{}", status.version, status.settings)
+        }
         Err(reason) => format!("error {reason}\n"),
     }
 }
 
-pub fn parse_reply(text: &str) -> Result<(String, String), String> {
-    let (head, body) = text.split_once('\n').unwrap_or((text, ""));
-    match head.split_once(' ') {
-        Some(("ok", version)) => Ok((version.to_owned(), body.to_owned())),
+pub fn parse_reply(text: &str) -> Result<Status, String> {
+    let (first, body) = text.split_once('\n').unwrap_or((text, ""));
+    let unexpected = || format!("unexpected reply from the vent daemon: {first:?}");
+    match first.split_once(' ') {
+        Some(("ok", rest)) => {
+            let (version, heat) = rest.split_once(' ').ok_or_else(unexpected)?;
+            Ok(Status {
+                version: version.to_owned(),
+                heat: heat.parse().ok(),
+                settings: body.parse()?,
+            })
+        }
         Some(("error", reason)) => Err(reason.to_owned()),
-        _ => Err(format!("unexpected reply from the vent daemon: {head:?}")),
+        _ => Err(unexpected()),
     }
 }
 
@@ -64,7 +90,8 @@ mod tests {
     fn requests_round_trip() {
         for request in [
             Request::Get,
-            Request::Release,
+            Request::Auto,
+            Request::Curve(Curve::default()),
             Request::Set {
                 fan: "right".into(),
                 speed: Speed::Percent(80.0),
@@ -76,9 +103,15 @@ mod tests {
 
     #[test]
     fn replies_round_trip() {
-        let ok = reply("0.1.0", &Ok("right max\n".into()));
-        assert_eq!(parse_reply(&ok), Ok(("0.1.0".into(), "right max\n".into())));
-        let error = reply("0.1.0", &Err("no fan named \"middle\"".into()));
+        for heat in [Some(64.5), None] {
+            let status = Status {
+                version: "0.2.0".into(),
+                heat,
+                settings: "right max\n".parse().unwrap(),
+            };
+            assert_eq!(parse_reply(&reply(&Ok(status.clone()))), Ok(status));
+        }
+        let error = reply(&Err("no fan named \"middle\"".into()));
         assert_eq!(parse_reply(&error), Err("no fan named \"middle\"".into()));
     }
 }

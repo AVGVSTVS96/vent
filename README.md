@@ -4,9 +4,10 @@ Fan control and temperatures for Apple Silicon Macs, from the command line.
 
 ```console
 $ vent
-left    1503 rpm  min
-right   5810 rpm  max
-cpu 69°  gpu 58°  memory 50°  ssd 49°  battery 44°
+left    3038 rpm  auto
+right   3206 rpm  auto
+cpu 87°  gpu 65°  memory 59°  ssd 40°  battery 32°
+heat 75°, auto curve 65° to 90°
 ```
 
 ## Install
@@ -16,22 +17,29 @@ curl -LsSf https://github.com/AVGVSTVS96/vent/releases/latest/download/vent-inst
 sudo vent install
 ```
 
-`sudo vent install` sets up the small root daemon that writes fan speeds. Run it again after updating vent.
+`sudo vent install` sets up the small root daemon that runs the fans. Run it again after updating vent.
+
+## How it runs the fans
+
+Every fan starts on auto. While the chip is cool, macOS runs the fans, which on Apple Silicon means quiet or off. Once the chip's heat, the hotter of the CPU's and GPU's average sensor, passes the curve's start, vent takes every auto fan and runs it from its minimum there to its maximum at the curve's end. When the heat drops 3° below the start, macOS gets them back.
+
+The heat is smoothed over about ten seconds, so a short burst of work doesn't spin the fans up. The daemon checks every second, and if anything else takes a fan, it takes it back.
 
 ## Use
 
 ```sh
-vent                   # fans and temperatures
+vent                   # fans, temperatures and the heat the curve sees
+vent curve             # the curve auto fans follow
+vent curve 60 85       # start at 60°, full speed at 85°
 vent set right max     # left, right, an index, or all
 vent set left 2500     # rpm
 vent set all 60%       # percent of each fan's range
-vent auto              # give every fan back to macOS
+vent set left system   # always macOS, never the curve
+vent auto              # every fan back on auto
 vent smc list T        # raw SMC keys by prefix
-sudo vent uninstall
+sudo vent uninstall    # give every fan back to macOS for good
 ```
 
-A setting holds until you change it, across reboots. The daemon gives every fan back to macOS before the Mac sleeps, when it stops, and if it crashes, and takes them again on wake and start.
-
-Run one fan controller at a time: another app writing fan speeds will undo vent's.
+Settings hold across reboots. The daemon gives every fan to macOS before the Mac sleeps, when it stops, and if it crashes, and picks them up again on wake and start.
 
 Tested on an M1 Max MacBook Pro.
